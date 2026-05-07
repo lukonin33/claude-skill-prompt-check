@@ -9,9 +9,9 @@ Audit and harden a generated prompt before delivering it to the user. Catches co
 5-layer self-audit before delivering a prompt to the user:
 
 1. **Internal consistency** — contradictions, ambiguity, leading questions, voice/register
-2. **Data completeness** — cwd, traceable id, files-to-read, measurable acceptance criteria, output path
+2. **Data completeness** — cwd, session-id vs task-id distinction, files-to-read, measurable acceptance criteria, output path
 3. **Dependencies** — phantom references, broken cross-refs, block order, external dependencies
-4. **Project-specific patterns scan** — uses your project's `patterns.md` if available, otherwise a generic 12-point checklist
+4. **Project-specific patterns scan** — uses your project's `patterns.md` if available, otherwise a generic **14-point checklist** (extended in v1.1 with source-of-truth read before code-suggestion + cost-tracking payload form for LLM/AI integrations)
 5. **Strengthening** — decision tree, top-3 surprises, scoring matrix, rollback, MVP variant
 
 3 modes:
@@ -19,6 +19,8 @@ Audit and harden a generated prompt before delivering it to the user. Catches co
 - **Light** (default, 1-2 min) — single-pass self-audit
 - **Deep** (`/prompt-check deep`, 5-10 min) — parallel subagents (Critic + Strengthener + optional Domain-researcher)
 - **Explain** (`/prompt-check explain`) — issues only, no auto-rewrite (learning mode)
+
+**Skip dispositions** (v1.1): when audit is genuinely unnecessary (slim prompt, quoting incoming handoff, emergency rollback, user explicit no-audit) — emit explicit disposition string instead of silent skip. Helps downstream automation distinguish intentional skip from regression.
 
 ## Installation
 
@@ -54,17 +56,46 @@ Trigger requires both an action verb AND a prompt-object — does not trigger on
 
 ## Connecting your project's patterns file
 
-Layer 4 looks for a project-specific patterns/lessons file. If you have one (e.g., `<your-project>/patterns.md` or `docs/PATTERNS.md`), Layer 4 will scan against the patterns recorded there. If you don't, a generic 12-point checklist is used.
+Layer 4 looks for a project-specific patterns/lessons file. If you have one (e.g., `<your-project>/patterns.md` or `docs/PATTERNS.md`), Layer 4 will scan against the patterns recorded there. If you don't, a generic 14-point checklist is used.
 
 Recommended sections for your `patterns.md`:
 
-- Diagnostic methodology
+- Diagnostic methodology (verify-before-prescribe, source-of-truth reads before code suggestions)
 - Migration patterns
 - Scheduling/notification patterns
 - System config gotchas
 - Architecture patterns (silent failures, recovery)
+- LLM/AI integration patterns (unit_type by billing model, separate units_in/out for token APIs)
 - Format checklist
 - Stop-and-ask triggers
+
+## Defense-in-depth setup (recommended for production workflows)
+
+Anthropic skill auto-trigger is **probabilistic**. For mission-critical workflows where prompt-quality regressions cause real downstream pain, layer this skill with additional defenses. See the `Defense-in-depth` section in `prompt-check/SKILL.md` for a 4-layer model:
+
+1. Memory / preamble note (passive reminder)
+2. This skill (active probabilistic, description-trigger)
+3. TodoWrite item per handoff (active runtime workflow gate)
+4. Stop hook (active technical block)
+
+Layers 1-3 are universal. Layer 4 is project-specific (depends on agent host).
+
+## Changelog
+
+### v1.1 (2026-05-08)
+
+Incident-driven update from real production usage. Added:
+
+- **Layer 2**: explicit session-id vs task-id distinction (common antipattern: conflating identity-of-chat with label-of-current-handoff)
+- **Layer 4 generic checklist**: extended from 12 to 14 points
+  - `source-of-truth read before code-suggestion` — if your prompt has a code snippet referencing JSON/config/DB-schema fields, verify the actual file before generating (don't predict structure from name)
+  - `cost-tracking payload form for LLM/AI integrations` — separate `units_in` + `units_out` (input vs output token prices differ; aggregation = silent zero-cost)
+- **Skip dispositions section**: 4 valid skip reasons with exact phrasing (slim / quoting / emergency / user explicit)
+- **Defense-in-depth section**: skill positioned within a 4-layer enforcement model
+
+### v1.0 (2026-05)
+
+Initial public release. 5 layers + 3 modes (Light/Deep/Explain) + structured deliverable.
 
 ## License
 
@@ -77,3 +108,4 @@ PRs welcome for:
 - New trigger phrases for other styles / registers / languages
 - Translations of SKILL.md
 - Mode C (Explain) refinements
+- Skip disposition examples for languages other than English

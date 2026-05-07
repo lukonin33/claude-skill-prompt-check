@@ -78,6 +78,23 @@ Selection rule of thumb: if the prompt is meant to start a **chat that will run 
 
 Runs all 5 layers but **does not rewrite** the prompt. Returns issues categorized (Critical / Important / Nice-to-have) with **why** each one matters, plus suggested fix in plain prose. The user keeps full control over the rewrite. Useful when the user is learning prompt engineering or explicitly wants to make the changes themselves.
 
+## Skip dispositions — when the audit is genuinely unnecessary
+
+Sometimes the audit is overkill (slim prompt) or inapplicable (you're quoting another chat's incoming handoff for context, not generating an outgoing one). In those cases, do **not** silently skip — emit an **explicit disposition** so reviewers and downstream automation (e.g., enforcement hooks) know the skip was intentional.
+
+Valid skip reasons (use exact phrasing or close variants):
+
+| Disposition | When to use | Example |
+|---|---|---|
+| `prompt-check skipped: prompt slim` | Prompt ≤15 lines, simple instruction, no acceptance criteria | `prompt-check skipped: prompt slim (≤15 lines, single-line task)` |
+| `prompt-check skipped: quoting incoming handoff` | The response quotes an incoming handoff from another chat for context — chat-id markers in the response refer to the **received** prompt, not your outgoing one | `prompt-check skipped: quoting incoming handoff from <upstream-chat-id>` |
+| `prompt-check skipped: emergency` | Time-critical rollback / hotfix instructions where audit latency is unacceptable | `prompt-check skipped: emergency rollback for incident #N` |
+| `prompt-check skipped: user explicit no-audit` | User in current turn said «no audit needed» / «just give me the prompt» | `prompt-check skipped: user explicit "no audit needed"` |
+
+**Anti-bypass:** the `prompt slim` disposition is **not** a way to trivialize normal-sized handoffs. If the prompt has acceptance criteria + identifiers + cwd + multi-block structure, it is not slim — it requires a verdict.
+
+**If none of the above applies** — run the full audit and emit `## prompt-check verdict`.
+
 ## The Checklist (all modes apply this; Deep adds subagent passes)
 
 Run in this order. Each item is binary `[ ]` (passed or failed). Failed items → fix in the prompt or explicitly note as known limitation.
@@ -92,7 +109,8 @@ Run in this order. Each item is binary `[ ]` (passed or failed). Failed items �
 ### Layer 2 — Data completeness
 
 - [ ] **Working directory specified** at the top (not guessed from context)
-- [ ] **Traceable session identifier** (your project's convention — e.g., chat-id, session-id, ticket-id)
+- [ ] **Traceable session identifier** (your project's convention — e.g., chat-id, session-id, ticket-id) — represents the **persistent identity** of the chat/session
+- [ ] **Task identifier separate from session identifier** (if applicable) — represents the **specific work unit / handoff label** within a session. Common antipattern: confusing the two and putting a task-specific slug in the chat-id field. Symptom: a "new" chat-id appears for every handoff from one and the same session. If your project has both concepts (e.g., chat-id + task-id, session-id + ticket-id), check both are present and distinguished in the prompt header.
 - [ ] **Files to read** listed explicitly (3-5 critical, not «read everything»)
 - [ ] **Pre-flight block**: what must be ready before start (env-vars, accounts, prereq files)
 - [ ] **Acceptance criteria measurable**: numbers, booleans, explicit thresholds — not «well», «optimal», «efficient»
@@ -119,20 +137,22 @@ If the user's project has a patterns/lessons file (e.g., `<PROJECT>/patterns.md`
 - Format checklist (cwd, traceable id, pre-flight, smoke-test, rollback)
 - Stop-and-ask triggers (destructive / financial risk / architectural choice A vs B)
 
-If **no patterns file is provided**, use the generic 12-point checklist below:
+If **no patterns file is provided**, use the generic 14-point checklist below:
 
 1. Verify before prescribe — diagnostic step before any change
 2. Smoking-gun query first — narrow root-cause check
 3. Pre-flight clarifying questions for ambiguity
 4. Prerequisite chain explicit (X requires Y, which requires Z)
 5. Disambiguate sources (which doc/branch/version)
-6. No hardcoded URLs/PIDs/IPs
-7. Webhook/integration re-registration after domain or env change
-8. Schema migrations explicit, with rollback step
-9. Cron uniqueness — only one runner if exclusive, otherwise lock
-10. Cooldown for notifications (no double-fires within N seconds)
-11. Recovery plan B / silent-failure detection / multi-layer state map
-12. Stop-and-ask triggers for destructive or irreversible operations
+6. **Source-of-truth read before code-suggestion** — if the prompt contains a code snippet referencing specific fields of a JSON/config/DB-schema/env file, read the actual file before generating (do not predict structure from name). Common antipattern: a brand-voice.json or settings.toml has a plausible-sounding field name and the code-snippet refers to it without a verify-step → silent failure when the receiving chat tries to run the code.
+7. No hardcoded URLs/PIDs/IPs
+8. Webhook/integration re-registration after domain or env change
+9. Schema migrations explicit, with rollback step
+10. Cron uniqueness — only one runner if exclusive, otherwise lock
+11. Cooldown for notifications (no double-fires within N seconds)
+12. Recovery plan B / silent-failure detection / multi-layer state map
+13. Stop-and-ask triggers for destructive or irreversible operations
+14. **Cost-tracking payload form for LLM/AI integrations** — if the prompt instructs the receiving chat to record API usage to a billing/observability tracker, ensure the payload form matches the provider's billing model. For token-based LLMs (OpenAI-style: `prompt_tokens` + `completion_tokens` separately) — input and output tokens must go to **separate fields** (typically `units_in` + `units_out`), not aggregated into a `total_tokens` field. Reason: input and output token prices usually differ; aggregation = silent zero-cost or wrong-cost recording.
 
 ### Layer 5 — Strengthening (additive, not corrective)
 
@@ -204,15 +224,34 @@ Never silently rewrite without showing what changed — the user must see the di
   - **Edge case «is it a plan or a prompt?»**: if the artifact is a text block ≤2-3 screens for one task (handoff prompt, research prompt, recovery prompt) → **prompt-check**. If it's a multi-stage development plan / architecture doc / multi-week roadmap → use a dedicated bulletproof/plan-review skill. Boundary is fuzzy but works in 90% of cases.
 - **Project patterns reference** — primary input for Layer 4. Skill reads it if present.
 
+## Defense-in-depth (recommended setup)
+
+This skill is one layer of a multi-layer defense against prompt-quality regressions. Anthropic skill auto-trigger is **probabilistic** — model decides «matches description» heuristically, and may miss legitimate handoffs. For mission-critical workflows (production handoffs, multi-chat orchestration), consider stacking layers:
+
+| Layer | Type | What it does | Failure mode it covers |
+|---|---|---|---|
+| 1. Memory / preamble note | Passive reminder | Auto-loaded at every chat start, reminds model of the rule | Model forgets the rule between sessions |
+| 2. This skill (description-trigger) | Active probabilistic | Triggers when model recognizes a prompt-output pattern | Active mid-session enforcement (probabilistic) |
+| 3. TodoWrite item per handoff | Active runtime gate | Workflow rule: create `prompt-check verdict for <X>` todo BEFORE generating handoff, mark complete only after verdict-block emitted | Forces conscious gate-passing rather than memory recall |
+| 4. Stop hook (optional) | Active technical block | Regex check on each stop event: if response contains handoff markers (e.g., `chat-id:`) but no `## prompt-check verdict` block AND no explicit skip disposition → block stop with reason | Catches regression of layers 1-3; final defense |
+
+Layer 4 (Stop hook) is project-specific to set up — depends on your IDE/agent host. Layers 1-3 are universal. Even a single layer beats no defense — start with whichever fits your project.
+
 ## History
 
 - v1.0 (2026-05) — initial public release. Origin: repeated manual review request («re-read, check, improve, give me the final version») after generating a prompt. Skill formalizes that workflow with 5 layers + 3 modes (Light / Deep / Explain) + structured deliverable.
+- v1.1 (2026-05-08) — incident-driven update from real production usage:
+  - Layer 2: added explicit **session-id vs task-id distinction** (common antipattern of conflating identity-of-chat with label-of-current-handoff)
+  - Layer 4 generic checklist: extended from 12 to 14 points — added `source-of-truth read before code-suggestion` (catches predict-from-name antipattern in code snippets) and `cost-tracking payload form for LLM/AI` (catches silent zero-cost from aggregating units_in/out)
+  - New `Skip dispositions` section: 4 explicit valid skip reasons (slim / quoting / emergency / user explicit) with exact phrasing — needed when downstream automation (Stop hook) wants to distinguish intentional skip from regression
+  - New `Defense-in-depth` section: skill positioned as one of 4 layers in mission-critical setups
 
 ## Known limitations
 
 - **Does not validate factual claims** in Light mode (e.g., «Service X costs $Y» won't be verified). Use Mode B + domain-researcher subagent with web search for that.
 - **Does not know your product specifics** — generic skill, does not replace your product-area orchestrator. If the prompt has product-specific business logic, that part remains the orchestrator's job.
-- **Layer 4 quality depends on patterns file**. Without one, the generic 12-point checklist gives baseline coverage but misses project-specific lessons. Recommend authoring a `patterns.md` for any long-running project.
+- **Layer 4 quality depends on patterns file**. Without one, the generic 14-point checklist gives baseline coverage but misses project-specific lessons. Recommend authoring a `patterns.md` for any long-running project.
+- **Probabilistic auto-trigger** — Anthropic skill description-based triggering is probabilistic, can be missed under high context load or unusual phrasing. For mission-critical workflows, stack additional defense layers (see `Defense-in-depth` section above).
 
 ## Contributing
 
